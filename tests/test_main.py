@@ -313,12 +313,22 @@ def _render_folded(*events, tty: bool = False) -> str:
     return out.getvalue()
 
 
-def test_a_folded_tool_start_names_the_tool_without_repeating_the_arguments() -> None:
-    """The args belong to the summary line that follows, so they appear only once."""
+def test_a_folded_tool_start_prints_nothing() -> None:
+    """The fold line on ToolEnd names the tool, so the running stage stays quiet."""
     from mypi.agent.loop import ToolStart
 
-    out = _render_folded(ToolStart(_call("read", {"path": "a.py"})))
-    assert out == " read\n", repr(out)
+    assert _render_folded(ToolStart(_call("read", {"path": "a.py"}))) == ""
+
+
+def test_a_started_and_finished_call_is_one_fold_line() -> None:
+    """No duplicate header: the fold line itself carries the tool's name."""
+    from mypi.agent.loop import ToolEnd, ToolStart
+
+    out = _render_folded(
+        ToolStart(_call("read", {"path": "a.py"})),
+        ToolEnd(_call("read", {"path": "a.py"}), "x = 1\ny = 2\n", False),
+    )
+    assert out == " ▸ read · a.py · 2 lines\n", repr(out)
 
 
 def test_tool_results_are_folded_to_one_line_by_default() -> None:

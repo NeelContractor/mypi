@@ -18,6 +18,7 @@ from .system import SYSTEM
 from .tools import tools
 from .tools.bash import shutdown_bash
 from .types import Message, UserMessage
+from .viewer import say_stop_reason
 
 # cwd first so a project can override the install's .env, then the one next to the code
 load_dotenv()
@@ -78,10 +79,13 @@ def render(
     provider_name: str,
     model: str,
     expand: bool = False,
-    record: list[viewer.Block] | None = None,
 ) -> Callable[[AgentEvent], None]:
     state = {"started": False, "prose": False, "at_bol": True}
     c = Colors()
+
+    def out(text: str) -> None:
+        sys.stdout.write(text)
+        sys.stdout.flush()
 
     def emit(prefix: str, text: str = "", end: str = "\n", flush: bool = False) -> None:
         if not state["started"]:
@@ -89,7 +93,7 @@ def render(
             prefix = prefix.lstrip("\n")
             state["started"] = True
         printed = prefix + text
-        print(printed, end=end, flush=flush)
+        out(printed + end)
         state["at_bol"] = end == "\n" or printed.endswith("\n")
 
     def gap() -> str:
@@ -105,36 +109,29 @@ def render(
                     emit(gap(), end="")
                 state["prose"] = True
             emit("", event.delta, end="", flush=True)
-            if record is not None:
-                record.append(viewer.Written(event.delta))
         elif isinstance(event, ToolStart):
             state["prose"] = False
-            name = c.paint(event.call.name, TOOL, bold=True)
             if expand:
+                name = c.paint(event.call.name, TOOL, bold=True)
                 args = c.paint(f" {event.call.arguments}", MUTED)
                 emit(f"{gap()} {name}{args}")
-            else:
-                # folded: the arguments belong to the summary line that follows,
-                # so the running header only names the tool
-                emit(f"{gap()} {name}")
+            # folded: the fold line on ToolEnd names the tool, so nothing prints here
         elif isinstance(event, ToolEnd):
             # name the call on every result: parallel calls finish out of order,
             # so a bare block can't be matched back to its header
             state["prose"] = False
             name, body = event.call.name, event.result
-            if record is not None:
-                record.append(viewer.ToolCall(name, event.call.arguments, body, event.is_error))
             if event.is_error:
                 head, *rest = body.split("\n", 1)
                 if rest:
-                    emit(f"\n {c.paint(f'{name} failed', ERROR, bold=True)}")
+                    emit(f"{gap()} {c.paint(f'{name} failed', ERROR, bold=True)}")
                     emit("", c.paint(_indent(body), ERROR))
                 else:
-                    emit(f"\n {c.paint(f'{name} failed: {head}', ERROR)}")
+                    emit(f"{gap()} {c.paint(f'{name} failed: {head}', ERROR)}")
             elif not expand:
-                # the accordion: one line per tool call; --expand opens them all
+                # the accordion: one line per tool call; --expand opens them in full
                 folded = viewer.ToolCall(name, event.call.arguments, body, False)
-                emit(f" {viewer.fold_header(folded, c)}")
+                emit(f"{gap()} {viewer.fold_header(folded, c)}")
             elif not body.strip():
                 emit(f"\n {c.paint(name, TOOL, bold=True)}: {c.paint('(no output)', MUTED)}")
             elif "\n" not in body.strip():
@@ -152,7 +149,7 @@ def render(
             summary = (
                 f"  {provider_name} · {model} · "
                 f"{m.usage.input} in / {m.usage.output} out tokens · "
-                f"{_say_stop_reason(m.stop_reason)}"
+                f"{say_stop_reason(m.stop_reason)}"
             )
             emit(f"{gap()}{c.paint(summary, MUTED)}")
         elif isinstance(event, RunEnd):
@@ -163,15 +160,6 @@ def render(
 
 
 _NOTE = re.compile(r"\[showing [^\]]*\]")
-
-
-def _say_stop_reason(reason: str) -> str:
-    """Turn the API's stop reasons into something a reader can act on."""
-    return {
-        "toolUse": "tool call",
-        "length": "hit the token budget",
-        "stop": "finished",
-    }.get(reason, reason)
 
 
 def _content_lines(body: str) -> list[str]:
@@ -222,21 +210,19 @@ async def amain(argv: list[str] | None = None) -> int:
 
     model = args.model or provider.default_model
     messages: list[Message] = [UserMessage(args.prompt)]
-    record: list[viewer.Block] = []
+
     try:
         await run_agent(
             provider=provider,
             model=model,
             tools=tools,
             messages=messages,
-            on_event=render(provider.name, model, expand=args.expand, record=record),
+            on_event=render(provider.name, model, expand=args.expand),
             system=system,
             max_turns=args.max_turns,
             max_continuations=args.max_continuations,
             stream_timeout=args.stream_timeout,
         )
-        if not args.expand:
-            _maybe_explore(record)
     except KeyboardInterrupt:
         print("\ninterrupted", file=sys.stderr)
         return 130
@@ -259,21 +245,6 @@ def main() -> None:
         sys.exit(asyncio.run(amain()))
     except KeyboardInterrupt:
         sys.exit(130)
-
-
-def _maybe_explore(record: list[viewer.Block]) -> None:
-    """After a run on a real terminal, reopen the tool calls to click on.
-
-    No prompt, no keypress: the viewer just takes the alternate screen so the
-    folded lines become clickable. Piping skips it entirely.
-    """
-    if not any(isinstance(b, viewer.ToolCall) and not b.is_error for b in record):
-        return
-    tty_out = getattr(sys.stdout, "isatty", lambda: False)()
-    tty_in = getattr(sys.stdin, "isatty", lambda: False)()
-    if not (tty_out and tty_in):
-        return
-    viewer.run(record)
 
 
 if __name__ == "__main__":

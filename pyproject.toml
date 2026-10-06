@@ -1,7 +1,7 @@
 [project]
 name = "mypi"
 version = "0.1.0"
-description = "Add your description here"
+description = "A small coding agent that works in your current folder."
 readme = "README.md"
 authors = [
     { name = "NeelContractor" }

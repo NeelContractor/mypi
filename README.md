@@ -31,7 +31,7 @@ mypi -p "prompt" [options]
 | `--max-turns` | give up after this many model turns (default 20) |
 | `--max-continuations` | how many times to ask a cut-off turn to carry on (default 3) |
 | `--stream-timeout` | seconds to wait on a stalled turn (default 300) |
-| `--expand` | print every tool call's full output; by default each call is one folded line, and a terminal lets you explore them interactively |
+| `--expand` | print every tool call's full output; by default each call is one folded line |
 | `--debug` | show the traceback instead of a one-line error |
 
 Keys and defaults are read from the environment or `.env` — the one in your current
@@ -68,12 +68,8 @@ and the line count:
 ▸ read · pyproject.toml · 51 lines
 ```
 
-Errors are never folded. Pass `--expand` to print every tool call in full. On a
-real terminal, a run that used tools opens the same calls in a viewer of its own
-(the scrolling transcript is untouched): **click a folded line to expand it and
-click the line again to shrink it**, no prompt required. `↑/↓` and `space` do
-the same by keyboard, `e`/`c` expand or collapse everything, `q`/`Esc` leave.
-Piped output never enters the viewer.
+Errors are never folded. Pass `--expand` to print every tool call's full output
+instead of folding it.
 
 ## Tools
 
@@ -137,6 +133,3 @@ uv run mypy
 ```
 
 The type checker covers `src/` only; the tests are deliberately left out of it.
-
-## Todo
-- accordion need a fix
