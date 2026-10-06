@@ -1,0 +1,51 @@
+[project]
+name = "mypi"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "NeelContractor" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "anthropic>=1.11.0",
+    "openai>=3.24.0",
+    "python-dotenv>=1.2.4",
+]
+
+[project.scripts]
+mypi = "mypi.main:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.24.0",
+    "ruff>=0.14.0",
+    "mypy>=1.17.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.11.19,<0.12.0"]
+build-backend = "uv_build"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "I", "UP", "SIM"]
+ignore = [
+    "SIM108",  # ternary conversions that read worse than the if/else they replace
+    "SIM112",  # flags ProgramFiles, which is correctly capitalised on Windows
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["mypi"]
+
+[tool.mypy]
+files = ["src"]
+strict = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
