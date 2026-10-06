@@ -10,7 +10,9 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from . import viewer
 from .agent.loop import AgentEvent, RunEnd, TextEvent, ToolEnd, ToolStart, TurnEnd, run_agent
+from .colors import ERROR, MUTED, TOOL, Colors
 from .providers import DEFAULT_MAX_TOKENS, PROVIDERS, get_provider
 from .system import SYSTEM
 from .tools import tools
@@ -59,6 +61,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=300.0,
         help="seconds to wait for the model before giving up on a turn",
     )
+    parser.add_argument(
+        "--expand",
+        action="store_true",
+        help="print every tool call's full output (default: one line per call)",
+    )
     parser.add_argument("--debug", action="store_true", help="show the traceback on failure")
     return parser
 
@@ -67,53 +74,104 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return build_parser().parse_args(argv)
 
 
-def render(provider_name: str, model: str) -> Callable[[AgentEvent], None]:
-    state = {"started": False}
+def render(
+    provider_name: str,
+    model: str,
+    expand: bool = False,
+    record: list[viewer.Block] | None = None,
+) -> Callable[[AgentEvent], None]:
+    state = {"started": False, "prose": False, "at_bol": True}
+    c = Colors()
 
     def emit(prefix: str, text: str = "", end: str = "\n", flush: bool = False) -> None:
         if not state["started"]:
             # the first thing printed shouldn't be preceded by blank lines
             prefix = prefix.lstrip("\n")
             state["started"] = True
-        print(prefix + text, end=end, flush=flush)
+        printed = prefix + text
+        print(printed, end=end, flush=flush)
+        state["at_bol"] = end == "\n" or printed.endswith("\n")
+
+    def gap() -> str:
+        """Exactly one blank line between sections, from wherever the cursor is."""
+        return "\n" if state["at_bol"] else "\n\n"
 
     def on_event(event: AgentEvent) -> None:
         if isinstance(event, TextEvent):
+            if not state["prose"]:
+                # the answer is its own paragraph: it must not start on the line
+                # right under the last tool result
+                if state["started"]:
+                    emit(gap(), end="")
+                state["prose"] = True
             emit("", event.delta, end="", flush=True)
+            if record is not None:
+                record.append(viewer.Written(event.delta))
         elif isinstance(event, ToolStart):
-            emit(f"\n {event.call.name} {event.call.arguments}")
+            state["prose"] = False
+            name = c.paint(event.call.name, TOOL, bold=True)
+            if expand:
+                args = c.paint(f" {event.call.arguments}", MUTED)
+                emit(f"{gap()} {name}{args}")
+            else:
+                # folded: the arguments belong to the summary line that follows,
+                # so the running header only names the tool
+                emit(f"{gap()} {name}")
         elif isinstance(event, ToolEnd):
             # name the call on every result: parallel calls finish out of order,
             # so a bare block can't be matched back to its header
+            state["prose"] = False
             name, body = event.call.name, event.result
+            if record is not None:
+                record.append(viewer.ToolCall(name, event.call.arguments, body, event.is_error))
             if event.is_error:
                 head, *rest = body.split("\n", 1)
                 if rest:
-                    emit(f"\n {name} failed")
-                    emit("", _indent(body))
+                    emit(f"\n {c.paint(f'{name} failed', ERROR, bold=True)}")
+                    emit("", c.paint(_indent(body), ERROR))
                 else:
-                    emit(f"\n {name} failed: {head}")
+                    emit(f"\n {c.paint(f'{name} failed: {head}', ERROR)}")
+            elif not expand:
+                # the accordion: one line per tool call; --expand opens them all
+                folded = viewer.ToolCall(name, event.call.arguments, body, False)
+                emit(f" {viewer.fold_header(folded, c)}")
             elif not body.strip():
-                emit(f"\n {name}: (no output)")
+                emit(f"\n {c.paint(name, TOOL, bold=True)}: {c.paint('(no output)', MUTED)}")
             elif "\n" not in body.strip():
                 # a status message ("created X") is its own summary; counting it is noise
-                emit(f"\n {name}: {body.strip()}")
+                emit(f"\n {c.paint(name, TOOL, bold=True)}: {c.paint(body.strip(), MUTED)}")
             else:
-                emit(f"\n {name}: {_count_lines(body)} lines")
-                emit("", _indent(body))
+                emit(
+                    f"\n {c.paint(name, TOOL, bold=True)}: "
+                    f"{c.paint(f'{_count_lines(body)} lines', MUTED)}"
+                )
+                emit("", c.paint(_indent(body), MUTED))
         elif isinstance(event, TurnEnd):
+            state["prose"] = False
             m = event.message
-            emit(
-                f"\n\n  {provider_name} ... {model} ... "
-                f"{m.usage.input} in / {m.usage.output} out ... {m.stop_reason}"
+            summary = (
+                f"  {provider_name} · {model} · "
+                f"{m.usage.input} in / {m.usage.output} out tokens · "
+                f"{_say_stop_reason(m.stop_reason)}"
             )
-        elif isinstance(event, RunEnd) and event.reason != "the model finished":
-            emit(f"\n  stopped: {event.reason}")
+            emit(f"{gap()}{c.paint(summary, MUTED)}")
+        elif isinstance(event, RunEnd):
+            if event.reason != "the model finished":
+                emit(f"{gap()}{c.paint(f'  stopped: {event.reason}', ERROR)}")
 
     return on_event
 
 
 _NOTE = re.compile(r"\[showing [^\]]*\]")
+
+
+def _say_stop_reason(reason: str) -> str:
+    """Turn the API's stop reasons into something a reader can act on."""
+    return {
+        "toolUse": "tool call",
+        "length": "hit the token budget",
+        "stop": "finished",
+    }.get(reason, reason)
 
 
 def _content_lines(body: str) -> list[str]:
@@ -141,9 +199,13 @@ def _indent(text: str, limit: int = 40) -> str:
 
 async def amain(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    c = Colors()
     if not args.prompt:
         print(
-            'no prompt: mypi -p "fix the failing test" [--provider ' + "|".join(PROVIDERS) + "]",
+            c.paint("no prompt: ", ERROR, bold=True)
+            + 'mypi -p "fix the failing test" [--provider '
+            + "|".join(PROVIDERS)
+            + "]",
             file=sys.stderr,
         )
         return 2
@@ -155,30 +217,33 @@ async def amain(argv: list[str] | None = None) -> int:
     try:
         provider = get_provider(args.provider, args.max_tokens)
     except ValueError as e:
-        print(f"error: {e}", file=sys.stderr)
+        print(c.paint("error: ", ERROR, bold=True) + str(e), file=sys.stderr)
         return 2
 
     model = args.model or provider.default_model
     messages: list[Message] = [UserMessage(args.prompt)]
+    record: list[viewer.Block] = []
     try:
         await run_agent(
             provider=provider,
             model=model,
             tools=tools,
             messages=messages,
-            on_event=render(provider.name, model),
+            on_event=render(provider.name, model, expand=args.expand, record=record),
             system=system,
             max_turns=args.max_turns,
             max_continuations=args.max_continuations,
             stream_timeout=args.stream_timeout,
         )
+        if not args.expand:
+            _maybe_explore(record)
     except KeyboardInterrupt:
         print("\ninterrupted", file=sys.stderr)
         return 130
     except Exception as e:
         if args.debug:
             raise
-        print(f"\nerror: {e}", file=sys.stderr)
+        print(c.paint("\nerror: ", ERROR, bold=True) + str(e), file=sys.stderr)
         print("       re-run with --debug for the full traceback", file=sys.stderr)
         return 1
     finally:
@@ -194,6 +259,21 @@ def main() -> None:
         sys.exit(asyncio.run(amain()))
     except KeyboardInterrupt:
         sys.exit(130)
+
+
+def _maybe_explore(record: list[viewer.Block]) -> None:
+    """After a run on a real terminal, reopen the tool calls to click on.
+
+    No prompt, no keypress: the viewer just takes the alternate screen so the
+    folded lines become clickable. Piping skips it entirely.
+    """
+    if not any(isinstance(b, viewer.ToolCall) and not b.is_error for b in record):
+        return
+    tty_out = getattr(sys.stdout, "isatty", lambda: False)()
+    tty_in = getattr(sys.stdin, "isatty", lambda: False)()
+    if not (tty_out and tty_in):
+        return
+    viewer.run(record)
 
 
 if __name__ == "__main__":

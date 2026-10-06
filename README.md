@@ -31,6 +31,7 @@ mypi -p "prompt" [options]
 | `--max-turns` | give up after this many model turns (default 20) |
 | `--max-continuations` | how many times to ask a cut-off turn to carry on (default 3) |
 | `--stream-timeout` | seconds to wait on a stalled turn (default 300) |
+| `--expand` | print every tool call's full output; by default each call is one folded line, and a terminal lets you explore them interactively |
 | `--debug` | show the traceback instead of a one-line error |
 
 Keys and defaults are read from the environment or `.env` — the one in your current
@@ -46,6 +47,33 @@ MODEL_NAME=gemma2-9b-it    # becomes the default for --model
 
 A flag on the command line always wins over `.env`, and a bad `MODEL_PROVIDER` is
 caught before any request goes out, with the valid choices listed.
+
+Output is colourised only when stdout is a real terminal: tool calls are orange,
+tool output and usage are muted grey, failures red. Pipe the output or set
+`NO_COLOR` and it falls back to the same plain text.
+
+After every turn a muted line says who was asked and how it went:
+
+```
+groq · openai/gpt-oss-20b · 3712 in / 439 out tokens · finished
+```
+
+provider, model, tokens sent and received, and why the turn ended — `finished`
+on its own, a `tool call` when it asked for one, or `hit the token budget`.
+
+By default each tool call is a single folded line — name, its arguments in brief,
+and the line count:
+
+```
+▸ read · pyproject.toml · 51 lines
+```
+
+Errors are never folded. Pass `--expand` to print every tool call in full. On a
+real terminal, a run that used tools opens the same calls in a viewer of its own
+(the scrolling transcript is untouched): **click a folded line to expand it and
+click the line again to shrink it**, no prompt required. `↑/↓` and `space` do
+the same by keyboard, `e`/`c` expand or collapse everything, `q`/`Esc` leave.
+Piped output never enters the viewer.
 
 ## Tools
 
@@ -109,3 +137,6 @@ uv run mypy
 ```
 
 The type checker covers `src/` only; the tests are deliberately left out of it.
+
+## Todo
+- accordion need a fix
