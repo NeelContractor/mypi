@@ -36,22 +36,54 @@ def count_lines(body: str) -> int:
     return len(lines)
 
 
-def short_args(arguments: dict[str, Any]) -> str:
-    """Compact argument summary: a lone value, otherwise the whole dict."""
-    if len(arguments) == 1:
-        return str(next(iter(arguments.values())))
-    return str(arguments)
+_SHOWING_RANGE = re.compile(r"\[showing lines (\d+)-(\d+) of \d+")
+
+
+def _clip(text: str, limit: int = 60) -> str:
+    text = " ".join(text.split())
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _what(call: ToolCall) -> str:
+    """One muted phrase for what was asked: 'src/main.py  ·  lines 1–200'."""
+    a = call.arguments
+    if call.name == "read":
+        shown = _SHOWING_RANGE.search(call.result)
+        if shown:
+            bits = [str(a.get("path", "")), f"lines {shown.group(1)}–{shown.group(2)}"]
+        else:
+            offset = int(a.get("offset") or 1)
+            bits = [str(a.get("path", ""))]
+            if a.get("limit") is not None:
+                bits.append(f"lines {offset}–{offset + int(a['limit']) - 1}")
+            elif offset > 1:
+                bits.append(f"from line {offset}")
+    else:
+        bits = [
+            _clip(str(a[key]))
+            for key in ("command", "pattern", "path", "glob", "name")
+            if a.get(key)
+        ][:2]
+    return "  ·  ".join(bit for bit in bits if bit)
+
+
+def _back(call: ToolCall) -> str:
+    """What came back: a line count, a one-liner, or nothing."""
+    body = call.result.strip()
+    if not body:
+        return "(no output)"
+    if "\n" not in body:
+        return _clip(body, 80)
+    return f"{count_lines(call.result)} lines"
 
 
 def fold_header(call: ToolCall, c: Colors) -> str:
-    """The one-line collapsed form, styled."""
-    head = c.paint(f"▸ {call.name}", TOOL, bold=True)
-    if not call.result.strip():
-        return f"{head} · {c.paint('(no output)', MUTED)}"
-    if "\n" not in call.result.strip():
-        return f"{head} · {c.paint(call.result.strip(), MUTED)}"
-    args = c.paint(short_args(call.arguments), MUTED)
-    return f"{head} · {args} · {c.paint(f'{count_lines(call.result)} lines', MUTED)}"
+    """Two collapsed lines: what was called, then what came back."""
+    head = c.paint("●", TOOL, bold=True) + " " + c.paint(call.name, TOOL, bold=True)
+    what = _what(call)
+    if what:
+        head += "  " + c.paint(what, MUTED)
+    return f"{head}\n  └─ {c.paint(_back(call), MUTED)}"
 
 
 def say_stop_reason(reason: str) -> str:

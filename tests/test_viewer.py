@@ -19,17 +19,23 @@ def test_count_lines_ignores_a_trailing_newline_and_a_showing_note() -> None:
 
 
 def test_fold_header_counts_a_multiline_result() -> None:
-    assert fold_header(_call("read", "x = 1\ny = 2\n"), _c()) == "▸ read · a.py · 2 lines"
+    assert fold_header(_call("read", "x = 1\ny = 2\n"), _c()) == "● read  a.py\n  └─ 2 lines"
+
+
+def test_fold_header_names_the_window_a_read_returned() -> None:
+    result = "x\n[showing lines 201-256 of 256]\n"
+    call = ToolCall("read", {"path": "a.py", "offset": 201, "limit": 200}, result, False)
+    assert fold_header(call, _c()) == "● read  a.py  ·  lines 201–256\n  └─ 1 lines"
 
 
 def test_fold_header_shows_a_single_line_result_in_full() -> None:
     call = ToolCall("write", {"path": "x"}, "created /x (3 bytes, 1 line)", False)
-    assert fold_header(call, _c()) == "▸ write · created /x (3 bytes, 1 line)"
+    assert fold_header(call, _c()) == "● write  x\n  └─ created /x (3 bytes, 1 line)"
 
 
 def test_fold_header_says_no_output_for_an_empty_result() -> None:
     call = ToolCall("write", {"path": "x"}, "", False)
-    assert fold_header(call, _c()) == "▸ write · (no output)"
+    assert fold_header(call, _c()) == "● write  x\n  └─ (no output)"
 
 
 def test_say_stop_reason_translates_the_api_reasons() -> None:

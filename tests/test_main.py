@@ -167,33 +167,44 @@ def test_single_line_error_names_the_call() -> None:
     assert out.startswith(" edit failed: old_string was not found")
 
 
-def test_first_output_is_not_padded_with_blank_lines() -> None:
+def test_summary_box_is_printed_once_at_the_end_and_totals_up() -> None:
+    from mypi.agent.loop import RunEnd, ToolEnd, TurnEnd
+    from mypi.types import AssistantMessage, Usage
+
+    out = _render(
+        ToolEnd(_call("read", {"path": "a.py"}), "x = 1\ny = 2\n", False),
+        TurnEnd(AssistantMessage([], Usage(3712, 439), "stop")),
+        TurnEnd(AssistantMessage([], Usage(3712, 439), "stop")),
+        RunEnd("the model finished"),
+    )
+    assert out.count("╭─") == 1, repr(out)  # the summary comes out exactly once
+    assert "╭─ groq / model-x " in out
+    assert "7.4k input  ·  878 output  ·  ✓ completed" in out
+    assert "╰" in out
+
+
+def test_turn_end_itself_prints_nothing() -> None:
+    """Usage accumulates quietly; the box appears on RunEnd, not per turn."""
     from mypi.agent.loop import TurnEnd
     from mypi.types import AssistantMessage, Usage
 
-    out = _render(TurnEnd(AssistantMessage([], Usage(1013, 42), "stop")))
-    assert out.startswith("  groq"), repr(out[:20])
-    assert "1013 in / 42 out" in out
+    assert _render(TurnEnd(AssistantMessage([], Usage(1013, 42), "stop"))) == ""
 
 
-def test_turn_summary_is_human_readable() -> None:
-    from mypi.agent.loop import TurnEnd
+def test_the_box_translates_stop_reasons() -> None:
+    from mypi.agent.loop import RunEnd, ToolEnd, TurnEnd
     from mypi.types import AssistantMessage, Usage
 
-    out = _render(TurnEnd(AssistantMessage([], Usage(3712, 439), "stop")))
-    assert out == "  groq · model-x · 3712 in / 439 out tokens · finished\n", repr(out)
+    def box(reason: str) -> str:
+        return _render(
+            ToolEnd(_call("read", {"path": "a.py"}), "ok\n", False),
+            TurnEnd(AssistantMessage([], Usage(1, 1), reason)),
+            RunEnd("the model finished"),
+        )
 
-
-def test_turn_summary_translates_every_stop_reason() -> None:
-    from mypi.agent.loop import TurnEnd
-    from mypi.types import AssistantMessage, Usage
-
-    def render(reason: str) -> str:
-        return _render(TurnEnd(AssistantMessage([], Usage(1, 1), reason)))
-
-    assert render("stop") == "  groq · model-x · 1 in / 1 out tokens · finished\n"
-    assert "· tool call" in render("toolUse")
-    assert "· hit the token budget" in render("length")
+    assert "✓ completed" in box("stop")
+    assert "hit the token budget" in box("length")
+    assert "tool call" in box("toolUse")
 
 
 def test_a_quiet_finish_prints_nothing_but_a_reason_does() -> None:
@@ -227,17 +238,15 @@ def test_a_tool_call_after_the_answer_gets_a_blank_line() -> None:
 
 
 def test_sections_never_touch_and_never_gap_twice() -> None:
-    from mypi.agent.loop import TextEvent, ToolEnd, TurnEnd
-    from mypi.types import AssistantMessage, Usage
+    from mypi.agent.loop import TextEvent, ToolEnd
 
     out = _render(
         ToolEnd(_call(), "one line", False),
         TextEvent("the answer"),
-        TurnEnd(AssistantMessage([], Usage(1, 1), "stop")),
         ToolEnd(_call(), "another", False),
     )
     assert "\n\n\n" not in out, repr(out)
-    assert out.count("\n\n") == 3, repr(out)
+    assert out.count("\n\n") == 1, repr(out)
 
 
 def _render_coloured(*events) -> str:
@@ -283,12 +292,17 @@ def test_tool_output_is_muted_and_a_failure_is_red() -> None:
     assert "247;118;142m" in bad  # #f7768e red for the failure
 
 
-def test_turn_summaries_are_muted() -> None:
-    from mypi.agent.loop import TurnEnd
+def test_the_summary_box_uses_accent_and_muted() -> None:
+    from mypi.agent.loop import RunEnd, ToolEnd, TurnEnd
     from mypi.types import AssistantMessage, Usage
 
-    out = _render_coloured(TurnEnd(AssistantMessage([], Usage(10, 5), "toolUse")))
-    assert "38;2;86;95;137m" in out  # #565f89
+    out = _render_coloured(
+        ToolEnd(_call("read", {"path": "a.py"}), "ok\n", False),
+        TurnEnd(AssistantMessage([], Usage(10, 5), "toolUse")),
+        RunEnd("the model finished"),
+    )
+    assert "1;38;2;122;162;247mgroq / model-x" in out  # title is bold accent
+    assert "38;2;86;95;137m╭" in out  # the frame is muted
 
 
 # --- the accordion: one line per tool call unless --expand ---
@@ -320,7 +334,7 @@ def test_a_folded_tool_start_prints_nothing() -> None:
     assert _render_folded(ToolStart(_call("read", {"path": "a.py"}))) == ""
 
 
-def test_a_started_and_finished_call_is_one_fold_line() -> None:
+def test_a_started_and_finished_call_is_one_fold_header() -> None:
     """No duplicate header: the fold line itself carries the tool's name."""
     from mypi.agent.loop import ToolEnd, ToolStart
 
@@ -328,27 +342,40 @@ def test_a_started_and_finished_call_is_one_fold_line() -> None:
         ToolStart(_call("read", {"path": "a.py"})),
         ToolEnd(_call("read", {"path": "a.py"}), "x = 1\ny = 2\n", False),
     )
-    assert out == " ▸ read · a.py · 2 lines\n", repr(out)
+    assert out == "● read  a.py\n  └─ 2 lines\n", repr(out)
 
 
-def test_tool_results_are_folded_to_one_line_by_default() -> None:
+def test_a_read_window_names_the_returned_range() -> None:
+    from mypi.agent.loop import ToolEnd
+
+    out = _render_folded(
+        ToolEnd(
+            _call("read", {"path": "a.py", "offset": 201, "limit": 200}),
+            "x\n[showing lines 201-256 of 256]\n",
+            False,
+        )
+    )
+    assert out == "● read  a.py  ·  lines 201–256\n  └─ 1 lines\n", repr(out)
+
+
+def test_tool_results_are_folded_by_default() -> None:
     from mypi.agent.loop import ToolEnd
 
     out = _render_folded(ToolEnd(_call("read", {"path": "a.py"}), "x = 1\ny = 2\n", False))
-    assert out == " ▸ read · a.py · 2 lines\n", repr(out)
+    assert out == "● read  a.py\n  └─ 2 lines\n", repr(out)
 
 
 def test_a_single_line_tool_result_stays_a_summary_when_folded() -> None:
     from mypi.agent.loop import ToolEnd
 
     out = _render_folded(ToolEnd(_call("write"), "created /x (29 bytes, 3 lines)", False))
-    assert out == " ▸ write · created /x (29 bytes, 3 lines)\n", repr(out)
+    assert out == "● write\n  └─ created /x (29 bytes, 3 lines)\n", repr(out)
 
 
 def test_an_empty_tool_result_folds_to_no_output() -> None:
     from mypi.agent.loop import ToolEnd
 
-    assert _render_folded(ToolEnd(_call(), "", False)) == " ▸ write · (no output)\n"
+    assert _render_folded(ToolEnd(_call(), "", False)) == "● write\n  └─ (no output)\n"
 
 
 def test_an_error_is_never_folded() -> None:
@@ -358,7 +385,7 @@ def test_an_error_is_never_folded() -> None:
     assert one_line.startswith(" edit failed: old_string was not found")
 
     multiline = _render_folded(ToolEnd(_call("edit"), "first line\nsecond\n", True))
-    assert "▸" not in multiline
+    assert "●" not in multiline
     assert " edit failed" in multiline
     assert "first line" in multiline
 
@@ -374,6 +401,7 @@ def test_folded_lines_are_coloured_too() -> None:
     from mypi.agent.loop import ToolEnd
 
     out = _render_folded(ToolEnd(_call("read", {"path": "a.py"}), "x\ny\n", False), tty=True)
-    assert "224;175;104m▸ read" in out  # bold #e0af68
-    assert "86;95;137ma.py" in out  # #565f89
+    assert "224;175;104m●" in out  # bold #e0af68 bullet
+    assert "224;175;104mread" in out  # bold #e0af68 tool name
+    assert "86;95;137ma.py" in out  # #565f89 summary
     assert "86;95;137m2 lines" in out

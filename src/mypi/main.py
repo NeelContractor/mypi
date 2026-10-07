@@ -7,12 +7,13 @@ import re
 import sys
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 from dotenv import load_dotenv
 
 from . import viewer
 from .agent.loop import AgentEvent, RunEnd, TextEvent, ToolEnd, ToolStart, TurnEnd, run_agent
-from .colors import ERROR, MUTED, TOOL, Colors
+from .colors import ACCENT, ERROR, MUTED, TOOL, Colors
 from .providers import DEFAULT_MAX_TOKENS, PROVIDERS, get_provider
 from .system import SYSTEM
 from .tools import tools
@@ -80,7 +81,14 @@ def render(
     model: str,
     expand: bool = False,
 ) -> Callable[[AgentEvent], None]:
-    state = {"started": False, "prose": False, "at_bol": True}
+    state: dict[str, Any] = {
+        "started": False,
+        "prose": False,
+        "at_bol": True,
+        "in": 0,
+        "out": 0,
+        "stop": "",
+    }
     c = Colors()
 
     def out(text: str) -> None:
@@ -131,7 +139,7 @@ def render(
             elif not expand:
                 # the accordion: one line per tool call; --expand opens them in full
                 folded = viewer.ToolCall(name, event.call.arguments, body, False)
-                emit(f"{gap()} {viewer.fold_header(folded, c)}")
+                emit(f"{gap()}{viewer.fold_header(folded, c)}")
             elif not body.strip():
                 emit(f"\n {c.paint(name, TOOL, bold=True)}: {c.paint('(no output)', MUTED)}")
             elif "\n" not in body.strip():
@@ -146,17 +154,52 @@ def render(
         elif isinstance(event, TurnEnd):
             state["prose"] = False
             m = event.message
-            summary = (
-                f"  {provider_name} · {model} · "
-                f"{m.usage.input} in / {m.usage.output} out tokens · "
-                f"{say_stop_reason(m.stop_reason)}"
-            )
-            emit(f"{gap()}{c.paint(summary, MUTED)}")
+            state["in"] += m.usage.input
+            state["out"] += m.usage.output
+            state["stop"] = m.stop_reason
         elif isinstance(event, RunEnd):
+            if state["started"]:
+                emit(f"{gap()}{_summary_box(c, provider_name, model, state)}")
             if event.reason != "the model finished":
                 emit(f"{gap()}{c.paint(f'  stopped: {event.reason}', ERROR)}")
 
     return on_event
+
+
+def _fmt_tokens(n: int) -> str:
+    """8242 -> '8.2k', 423 -> '423'."""
+    if n < 1000:
+        return str(n)
+    return f"{n / 1000:.1f}".rstrip("0").rstrip(".") + "k"
+
+
+def _summary_box(c: Colors, provider: str, model: str, state: dict[str, Any]) -> str:
+    """The closing stats card, rounded corners and all."""
+    title = f"{provider} / {model}"
+    status = {"stop": "✓ completed"}.get(state["stop"]) or say_stop_reason(state["stop"])
+    parts = [
+        (_fmt_tokens(state["in"]), ACCENT, True),
+        (" input", MUTED, False),
+        ("  ·  ", MUTED, False),
+        (_fmt_tokens(state["out"]), ACCENT, True),
+        (" output", MUTED, False),
+        ("  ·  ", MUTED, False),
+        (status, ACCENT if state["stop"] == "stop" else ERROR, True),
+    ]
+    plain = "".join(t for t, _, _ in parts)
+    width = max(60, len(title) + 5, len(plain) + 6)
+    top = (
+        c.paint("╭─ ", MUTED)
+        + c.paint(title, ACCENT, bold=True)
+        + c.paint(" " + "─" * (width - 5 - len(title)) + "╮", MUTED)
+    )
+    body = (
+        c.paint("│  ", MUTED)
+        + "".join(c.paint(t, col, bold=bold) for t, col, bold in parts)
+        + c.paint(" " * (width - 4 - len(plain)) + "│", MUTED)
+    )
+    bottom = c.paint("╰" + "─" * (width - 2) + "╯", MUTED)
+    return f"{top}\n{body}\n{bottom}"
 
 
 _NOTE = re.compile(r"\[showing [^\]]*\]")
